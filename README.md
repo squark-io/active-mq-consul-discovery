@@ -20,6 +20,7 @@ Configure a network connector with `consul` as URI in `activemq.xml`
   <networkConnector uri="consul:(http://consul.example.com?service=active-mq)"/>
 </networkConnectors>
 ```
+This will perform discovery against http://consul.example.com/v1/health/service/active-mq, i.e. the actual API endpoint is automatically appended and should NOT be included in the URI.
 `service` is the only currently supported parameter on the Consul component itself, however, the same parameters as those used for static networks can be used and will be applied to each service instance.
 E.g:
 ```xml
