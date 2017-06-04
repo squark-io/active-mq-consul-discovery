@@ -14,6 +14,7 @@ cp target/active-mq-consul-discovery-[VERSION]-jar-with-dependencies.jar [JBOSS 
 ```
 
 ## Configure
+### Network of brokers
 Configure a network connector with `consul` as URI in `activemq.xml`
 ```xml
 <networkConnectors>
@@ -26,6 +27,19 @@ E.g:
 ```xml
 <networkConnector uri="consul:(http://consul.example.com?service=active-mq)?initialReconnectDelay=500&amp;maxReconnectDelay=10000"/>
 ```
+### Client-side
+This has not been tested yet, but in theory, it should work with
+```
+<transportConnectors>
+  <transportConnector name="default" uri="discovery:(consul:(http://consul.example.com?service=active-mq))"/>
+</transportConnectors>
+```
+
+## Road-map
+Planned items are:
+* Proper client-side testing
+* Self-advertisement (currently, external advertisement is necessary)
+* Maven releases
 
 ## Contributions
 Feel free to make feature requests or preferably pull requests!
