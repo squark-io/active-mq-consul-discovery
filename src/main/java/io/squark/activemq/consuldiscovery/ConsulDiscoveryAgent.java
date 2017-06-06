@@ -1,16 +1,17 @@
 package io.squark.activemq.consuldiscovery;
 
-import com.google.gson.FieldNamingPolicy;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonDeserializationContext;
-import com.google.gson.JsonDeserializer;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonParseException;
-import com.google.gson.reflect.TypeToken;
-import io.squark.activemq.consuldiscovery.model.Check;
-import io.squark.activemq.consuldiscovery.model.Service;
-import io.squark.activemq.consuldiscovery.model.ServiceNode;
+import com.orbitz.consul.Consul;
+import com.orbitz.consul.HealthClient;
+import com.orbitz.consul.cache.ConsulCache;
+import com.orbitz.consul.cache.ServiceHealthCache;
+import com.orbitz.consul.cache.ServiceHealthKey;
+import com.orbitz.consul.model.agent.ImmutableRegCheck;
+import com.orbitz.consul.model.agent.ImmutableRegistration;
+import com.orbitz.consul.model.agent.Registration;
+import com.orbitz.consul.model.health.HealthCheck;
+import com.orbitz.consul.model.health.Service;
+import com.orbitz.consul.model.health.ServiceHealth;
+import com.orbitz.consul.option.QueryOptions;
 import org.apache.activemq.command.DiscoveryEvent;
 import org.apache.activemq.thread.TaskRunnerFactory;
 import org.apache.activemq.transport.discovery.DiscoveryAgent;
@@ -20,29 +21,28 @@ import org.apache.activemq.util.URISupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.lang.reflect.Type;
-import java.net.InetAddress;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class ConsulDiscoveryAgent implements DiscoveryAgent {
 
   private final static Logger LOG = LoggerFactory.getLogger(ConsulDiscoveryAgent.class);
-  private final URI fullPath;
   private final Object sleepMutex = new Object();
   private final Object pollSleepMutex = new Object();
   private final AtomicBoolean running = new AtomicBoolean(false);
+  private final URI basePath;
+  private final String consulServiceName;
+  private final String consulServiceId;
+  private final String consulServiceAddress;
+  private final String consulServicePort;
   private long initialReconnectDelay = 1000;
   private long maxReconnectDelay = 1000 * 30;
   private long backOffMultiplier = 2;
@@ -52,31 +52,27 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
   private DiscoveryListener listener;
   private Set<Service> services = new HashSet<Service>();
   private TaskRunnerFactory taskRunner;
-  private long pollingDelay = 30000L;
-  private ScheduledExecutorService pollRunner;
-  private JsonDeserializer<Check.Status> statusJsonDeserializer = new JsonDeserializer<Check.Status>() {
+
+  private Consul consul;
+  private ServiceHealthCache serviceHealthCache;
+  private ConsulCache.Listener<ServiceHealthKey, ServiceHealth> serviceListener = new ConsulCache
+    .Listener<ServiceHealthKey, ServiceHealth>() {
     @Override
-    public Check.Status deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws
-      JsonParseException {
-      return Check.Status.byName(json.getAsString());
+    public void notify(Map<ServiceHealthKey, ServiceHealth> newValues) {
+      handleServices(newValues.values());
     }
   };
-  private Gson gson = new GsonBuilder().setFieldNamingPolicy(FieldNamingPolicy.UPPER_CAMEL_CASE)
-    .registerTypeAdapter(Check.Status.class, statusJsonDeserializer).create();
-  private Runnable pollRunnable = new Runnable() {
+  private final Thread shutdownHook = new Thread() {
     @Override
     public void run() {
-      if (!running.get()) {
-        LOG.debug("Polling disabled: stopped");
-        Thread.currentThread().interrupt();
-      }
+      LOG.info("Shutdown hook executed. Deregistering from Consul");
       try {
-        synchronized (pollSleepMutex) {
-          pollServices();
-        }
-      } catch (Throwable t) {
-        LOG.warn("Failed polling!", t);
+        serviceHealthCache.removeListener(serviceListener);
+        serviceHealthCache.stop();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
       }
+      consul.agentClient().deregister(consulServiceId);
     }
   };
 
@@ -88,22 +84,27 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       IntrospectionSupport.setProperties(this, options);
       if (data.getComponents().length != 1) {
         throw new IOException(
-          "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService)?params\". Found " +
+          "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService&amp;address=amq.example.com&amp;port=61616)?params\". Found " +
             consulURI);
       }
       URI baseURI = data.getComponents()[0];
       LOG.info("Consul base URI: " + baseURI);
       URI basePath = URISupport.removeQuery(baseURI);
       Map<String, String> parameters = URISupport.parseParameters(baseURI);
-      if (!parameters.containsKey("service")) {
+      if (!parameters.containsKey("service") || !parameters.containsKey("address") || !parameters.containsKey("port")) {
         throw new IOException(
-          "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService)?params\". Found " +
+          "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService&amp;address=amq.example.com&amp;port=61616)?params\". Found " +
             consulURI);
       }
       if (!basePath.toString().endsWith("/")) {
         basePath = basePath.resolve("/");
       }
-      fullPath = basePath.resolve("v1/health/service/" + parameters.get("service"));
+      this.basePath = basePath;
+      consulServiceName = parameters.get("service");
+      consulServiceId = parameters.get("serviceId") != null ? parameters.get("serviceId") : Long
+        .toHexString(UUID.randomUUID().getLeastSignificantBits());
+      consulServiceAddress = parameters.get("address");
+      consulServicePort = parameters.get("port");
     } catch (Throwable e) {
       LOG.error("Failed to create Consul DiscoveryAgent for URI " + consulURI, e);
       if (e instanceof RuntimeException) {
@@ -124,75 +125,105 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
 
   @Override
   public void start() throws Exception {
-    LOG.info("Starting Consul Discovery Agent for " + fullPath);
+    LOG.info("Starting Consul Discovery Agent for " + basePath);
     taskRunner = new TaskRunnerFactory("Consul Discovery Agent");
     taskRunner.init();
     running.set(true);
 
-    pollRunner = Executors.newSingleThreadScheduledExecutor();
-    pollRunner.scheduleWithFixedDelay(pollRunnable, 0, pollingDelay, TimeUnit.MILLISECONDS);
-  }
+    consul = Consul.builder().withUrl(basePath.toURL()).build();
+    registerSelf();
 
-  private void pollServices() {
     try {
-      LOG.info("Will attempt Consul discovery from " + fullPath);
-      BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(fullPath.toURL().openStream()));
-      List<ServiceNode> serviceList =
-        gson.fromJson(bufferedReader, new TypeToken<ArrayList<ServiceNode>>() {}.getType());
-      bufferedReader.close();
-      LOG.info("Found (" + serviceList.size() + ") services.");
-      List<ServiceNode> servicesToAdd = new ArrayList<ServiceNode>();
-      List<ServiceNode> servicesToDelete = new ArrayList<ServiceNode>();
-      for (ServiceNode serviceNode : serviceList) {
-        if (serviceNode.isPassing()) {
-          Long listenPort = Long.getLong("activemq.port", -1);
-          String listenHost = System.getProperty("activemq.host");
-          String resolvedHost = InetAddress.getLocalHost().getHostAddress();
-          //If we are listening on the same address:port as the service, that means we found ourselves. Skip that.
-          if (
-            !(serviceNode.getService().getPort().equals(listenPort) &&
-              (serviceNode.getService().getAddress().equals(listenHost) ||
-                serviceNode.getService().getAddress().equals(resolvedHost)))
-            ) {
-            servicesToAdd.add(serviceNode);
-          } else {
-            LOG.info("Skipping self (" + serviceNode.getService() + ")");
-          }
-        } else {
-          LOG.info("Service " + serviceNode.getService() + " is failing. Making sure it is deleted.");
-          servicesToDelete.add(serviceNode);
-        }
-      }
-      for (ServiceNode serviceNode : servicesToDelete) {
-        if (services.contains(serviceNode.getService())) {
-          LOG.info("Removing service " + serviceNode.getService() + " with failing checks " + serviceNode.getChecks());
-          services.remove(serviceNode.getService());
-          listener.onServiceRemove(new ConsulDiscoveryEvent(serviceNode.getService()));
-        }
-      }
-      List<Service> servicesAdded = new ArrayList<Service>();
-      for (ServiceNode serviceNode : servicesToAdd) {
-        if (!services.contains(serviceNode.getService())) {
-          LOG.info("Adding service " + serviceNode.getService());
-        }
-        services.add(serviceNode.getService());
-        listener.onServiceAdd(new ConsulDiscoveryEvent(serviceNode.getService()));
-        servicesAdded.add(serviceNode.getService());
-      }
-      List<Service> orphanedServices = new ArrayList<Service>(services);
-      orphanedServices.removeAll(servicesAdded);
-      for (Service toDelete : orphanedServices) {
-        listener.onServiceRemove(new ConsulDiscoveryEvent(toDelete));
-        LOG.info("Removing no longer available service " + toDelete);
-      }
-    } catch (IOException e) {
+      HealthClient healthClient = consul.healthClient();
+      List<ServiceHealth> services = healthClient.getAllServiceInstances(consulServiceName).getResponse();
+      handleServices(services);
+      serviceHealthCache = ServiceHealthCache
+        .newCache(healthClient, consulServiceName, false, QueryOptions.BLANK, 30);
+      serviceHealthCache.addListener(serviceListener);
+
+      serviceHealthCache.start();
+    } catch (Exception e) {
       throw new RuntimeException(e);
     }
   }
 
+  private void handleServices(Collection<ServiceHealth> serviceList) {
+    LOG.info("Found (" + serviceList.size() + ") services.");
+    List<ServiceHealth> servicesToAdd = new ArrayList<ServiceHealth>();
+    List<ServiceHealth> servicesToDelete = new ArrayList<ServiceHealth>();
+    boolean foundSelf = false;
+    for (ServiceHealth serviceNode : serviceList) {
+      boolean passing = true;
+      if (serviceNode.getService().getId().equals(consulServiceId)) {
+        foundSelf = true;
+        //Found self, not adding.
+        continue;
+      } else {
+        for (HealthCheck check : serviceNode.getChecks()) {
+          if (!check.getStatus().equals("passing")) {
+            passing = false;
+            break;
+          }
+        }
+      }
+      if (passing) {
+        servicesToAdd.add(serviceNode);
+      } else {
+        servicesToDelete.add(serviceNode);
+      }
+    }
+    for (ServiceHealth serviceNode : servicesToDelete) {
+      if (services.contains(serviceNode.getService())) {
+        LOG.info("Removing service " + serviceNode.getService().getId() + " with failing checks");
+        services.remove(serviceNode.getService());
+        listener.onServiceRemove(new ConsulDiscoveryEvent(serviceNode.getService()));
+      }
+    }
+    List<Service> servicesAdded = new ArrayList<Service>();
+    for (ServiceHealth serviceNode : servicesToAdd) {
+      if (!services.contains(serviceNode.getService())) {
+        //Only logging if not already added.
+        LOG.info("Adding service " + serviceNode.getService().getId());
+      }
+      services.add(serviceNode.getService());
+      listener.onServiceAdd(new ConsulDiscoveryEvent(serviceNode.getService()));
+      servicesAdded.add(serviceNode.getService());
+    }
+    List<Service> orphanedServices = new ArrayList<Service>(services);
+    orphanedServices.removeAll(servicesAdded);
+    for (Service toDelete : orphanedServices) {
+      listener.onServiceRemove(new ConsulDiscoveryEvent(toDelete));
+      LOG.info("Removing no longer available service " + toDelete);
+    }
+    if (!foundSelf) {
+      //We did not find ourselves. We were deregistered somehow. Registering.
+      registerSelf();
+    }
+
+  }
+
+  private void registerSelf() {
+    LOG.info("Registering self with Consul");
+    Registration.RegCheck tcpCheck = ImmutableRegCheck.builder()
+      .tcp(consulServiceAddress + ":" + consulServicePort)
+      .interval("10s")
+      .timeout("10s")
+      .deregisterCriticalServiceAfter("1m").build();
+    Registration registration = ImmutableRegistration.builder()
+      .address(consulServiceAddress)
+      .port(Integer.parseInt(consulServicePort))
+      .name(consulServiceName)
+      .id(consulServiceId)
+      .check(tcpCheck)
+      .build();
+    consul.agentClient().register(registration);
+    Runtime.getRuntime().removeShutdownHook(shutdownHook);
+    Runtime.getRuntime().addShutdownHook(shutdownHook);
+  }
+
   @Override
   public void stop() throws Exception {
-    LOG.info("Stopping Consul Discovery Agent for " + fullPath);
+    LOG.info("Stopping Consul Discovery Agent for " + basePath);
     running.set(false);
 
     if (taskRunner != null) {
@@ -331,14 +362,6 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
 
   public void setMinConnectTime(long minConnectTime) {
     this.minConnectTime = minConnectTime;
-  }
-
-  public long getPollingDelay() {
-    return pollingDelay;
-  }
-
-  public void setPollingDelay(long pollingDelay) {
-    this.pollingDelay = pollingDelay;
   }
 
   public boolean isUseExponentialBackOff() {
