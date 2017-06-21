@@ -38,7 +38,6 @@ This has not been tested yet, but in theory, it should work with
 ## Road-map
 Planned items are:
 * Proper client-side testing
-* Self-advertisement (currently, external advertisement is necessary)
 * Maven releases
 
 ## Contributions
