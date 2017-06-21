@@ -6,7 +6,7 @@
 
     <groupId>io.squark</groupId>
     <artifactId>active-mq-consul-discovery</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.0.2-SNAPSHOT</version>
     <build>
         <plugins>
             <plugin>
