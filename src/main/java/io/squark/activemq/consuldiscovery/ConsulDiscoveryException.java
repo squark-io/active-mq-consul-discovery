@@ -8,4 +8,8 @@ public class ConsulDiscoveryException extends RuntimeException {
   public ConsulDiscoveryException(Throwable cause) {
     super(cause);
   }
+
+  public ConsulDiscoveryException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

@@ -43,8 +43,8 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
 
   private final static Logger LOG = LoggerFactory.getLogger(ConsulDiscoveryAgent.class);
   private static int BACKOFF_MULTIPLIER = 2;
-  private static int MAX_QUARANTINE_TIME = 120000;
-  private static long INTERVAL = 30000L;
+  private static long maxQuarantineTime = 120000;
+  private static long pollingInterval = 30000L;
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final URI basePath;
   private final String consulServiceName;
@@ -81,7 +81,7 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       if (data.getComponents().length != 1) {
         throw new ConsulDiscoveryException(
           "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService&amp;address=amq.example" +
-            ".com&amp;port=61616)?params\". Found " +
+            ".com&amp;port=61616)\". Found " +
             consulURI);
       }
       URI baseURI = data.getComponents()[0];
@@ -91,7 +91,7 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       if (!parameters.containsKey("service") || !parameters.containsKey("address") || !parameters.containsKey("port")) {
         throw new ConsulDiscoveryException(
           "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService&amp;address=amq.example" +
-            ".com&amp;port=61616)?params\". Found " +
+            ".com&amp;port=61616)\". Found " +
             consulURI);
       }
       if (!basePath.toString().endsWith("/")) {
@@ -103,6 +103,24 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
         .toHexString(UUID.randomUUID().getLeastSignificantBits());
       consulServiceAddress = parameters.get("address");
       consulServicePort = parameters.get("port");
+
+      String maxQuarantineTimeString = parameters.get("maxQuarantineTime");
+      if (maxQuarantineTimeString != null) {
+        try {
+          maxQuarantineTime = Long.parseLong(maxQuarantineTimeString);
+        } catch (NumberFormatException e) {
+          throw new ConsulDiscoveryException(
+            "Failed to parse maxQuarantineTime \"" + maxQuarantineTimeString + "\"", e);
+        }
+      }
+      String intervalString = parameters.get("interval");
+      if (intervalString != null) {
+        try {
+          pollingInterval = Long.parseLong(intervalString);
+        } catch (NumberFormatException e) {
+          throw new ConsulDiscoveryException("Failed to parse interval \"" + intervalString + "\"", e);
+        }
+      }
     } catch (Throwable e) {
       LOG.error("Failed to create Consul DiscoveryAgent for URI " + consulURI, e);
       if (e instanceof ConsulDiscoveryException) {
@@ -149,7 +167,7 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
           Thread.currentThread().interrupt();
         }
       }
-    }, 0, INTERVAL, TimeUnit.MILLISECONDS);
+    }, 0, pollingInterval, TimeUnit.MILLISECONDS);
   }
 
   private void handleServices(Collection<ServiceHealth> serviceList) {
@@ -279,9 +297,9 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       // Simply remove the failing service and let service discovery handle reconnection.
       services.remove(consulDiscoveryEvent.getService().getId());
       listener.onServiceRemove(consulDiscoveryEvent);
-      long delay = Math.max(INTERVAL, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * INTERVAL);
-      if (delay > MAX_QUARANTINE_TIME) {
-        delay = MAX_QUARANTINE_TIME;
+      long delay = Math.max(pollingInterval, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * pollingInterval);
+      if (delay > maxQuarantineTime) {
+        delay = maxQuarantineTime;
       }
       consulDiscoveryEvent.numberOfFails++;
       if (consulDiscoveryEvent.failAt <= 0) {
@@ -293,9 +311,9 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
             "that we're experiencing a new, unrelated, error event. Resetting quarantine.");
           consulDiscoveryEvent.failAt = System.currentTimeMillis();
           consulDiscoveryEvent.numberOfFails = 1;
-          delay = Math.max(INTERVAL, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * INTERVAL);
-          if (delay > MAX_QUARANTINE_TIME) {
-            delay = MAX_QUARANTINE_TIME;
+          delay = Math.max(pollingInterval, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * pollingInterval);
+          if (delay > maxQuarantineTime) {
+            delay = maxQuarantineTime;
           }
         }
       }
