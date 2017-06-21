@@ -23,7 +23,7 @@ Configure a network connector with `consul` as URI in `activemq.xml`
 ```
 This will perform discovery against http://consul.example.com/v1/health/service/active-mq, i.e. the actual API endpoint is automatically appended and should NOT be included in the URI.
 
-The following parameters are required:
+The following parameters are *required*:
 <dl>
   <dt>service</dt>
   <dd>the name of the service to register with Consul</dd>
@@ -33,7 +33,8 @@ The following parameters are required:
   <dd>the port on which A-MQ listens</dd>
 </dl>
 
-The following parameters are supported but not required:
+
+The following parameters are supported but *not required*:
 <dl>
   <dt>serviceId</dt>
   <dd>the ID for this instance of the service. Will be randomly generated if left out.</dd>
