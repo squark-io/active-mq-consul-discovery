@@ -22,16 +22,25 @@ Configure a network connector with `consul` as URI in `activemq.xml`
 </networkConnectors>
 ```
 This will perform discovery against http://consul.example.com/v1/health/service/active-mq, i.e. the actual API endpoint is automatically appended and should NOT be included in the URI.
+The following parameters are required:
+* service\t(the name of the service to register with Consul)
+* address\t(the address to the service, i.e the host at which A-MQ listens)
+* port\t(the port on which A-MQ listens)
+The following parameters are supported but not required:
+* serviceId\t(the ID for this instance of the service. Will be randomly generated if left out.)
+* maxQuarantineTime\t(The maximum time to quarantine a failing peer service that is still available in Consul)
+* interval\t(The interval with which to poll Consul for service instances)
+
 `service` is the only currently supported parameter on the Consul component itself, however, the same parameters as those used for static networks can be used and will be applied to each service instance.
 E.g:
 ```xml
-<networkConnector uri="consul:(http://consul.example.com?service=active-mq)?initialReconnectDelay=500&amp;maxReconnectDelay=10000"/>
+<networkConnector uri="consul:(http://consul.example.com?service=active-mq&amp;address=amq.example.com&amp;port=61616)"/>
 ```
 ### Client-side
 This has not been tested yet, but in theory, it should work with
 ```
 <transportConnectors>
-  <transportConnector name="default" uri="discovery:(consul:(http://consul.example.com?service=active-mq))"/>
+  <transportConnector name="default" uri="discovery:(consul:(http://consul.example.com?service=active-mq&amp;address=amq.example.com&amp;port=61616))"/>
 </transportConnectors>
 ```
 
