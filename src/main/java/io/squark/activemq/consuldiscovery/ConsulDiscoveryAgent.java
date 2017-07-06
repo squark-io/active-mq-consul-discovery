@@ -1,8 +1,7 @@
 package io.squark.activemq.consuldiscovery;
 
 import com.orbitz.consul.Consul;
-import com.orbitz.consul.HealthClient;
-import com.orbitz.consul.model.State;
+import com.orbitz.consul.NotRegisteredException;
 import com.orbitz.consul.model.agent.ImmutableRegCheck;
 import com.orbitz.consul.model.agent.ImmutableRegistration;
 import com.orbitz.consul.model.agent.Registration;
@@ -19,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.MalformedURLException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -42,9 +42,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class ConsulDiscoveryAgent implements DiscoveryAgent {
 
   private final static Logger LOG = LoggerFactory.getLogger(ConsulDiscoveryAgent.class);
+  static long pollingInterval = 30000L;
   private static int BACKOFF_MULTIPLIER = 2;
   private static long maxQuarantineTime = 120000;
-  private static long pollingInterval = 30000L;
+  private static ConsulHolder CONSUL_HOLDER;
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final URI basePath;
   private final String consulServiceName;
@@ -52,16 +53,18 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
   private final String consulServiceAddress;
   private final String consulServicePort;
   private final Map<String, ConsulDiscoveryEvent> quarantinedServices = new HashMap<String, ConsulDiscoveryEvent>();
+  private boolean clientOnly = false;
   private Map<String, Service> services = new HashMap<String, Service>();
   private DiscoveryListener listener;
   private TaskRunnerFactory taskRunner;
-  private Consul consul;
   private ScheduledExecutorService executorService;
   private final Thread shutdownHook = new Thread() {
     @Override
     public void run() {
       LOG.info("Shutdown hook executed. Deregistering from Consul");
-      consul.agentClient().deregister(consulServiceId);
+      if (CONSUL_HOLDER != null && CONSUL_HOLDER.hasInstance()) {
+        CONSUL_HOLDER.deregister(consulServiceId);
+      }
       try {
         if (executorService != null) {
           executorService.shutdown();
@@ -81,26 +84,30 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       if (data.getComponents().length != 1) {
         throw new ConsulDiscoveryException(
           "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService&amp;address=amq.example" +
-            ".com&amp;port=61616)\". Found " +
-            consulURI);
+          ".com&amp;port=61616)\". Found " + consulURI);
       }
       URI baseURI = data.getComponents()[0];
       LOG.info("Consul base URI: " + baseURI);
       URI basePath = URISupport.removeQuery(baseURI);
       Map<String, String> parameters = URISupport.parseParameters(baseURI);
-      if (!parameters.containsKey("service") || !parameters.containsKey("address") || !parameters.containsKey("port")) {
+      boolean clientOnly = false;
+      if (parameters.containsKey("clientOnly")) {
+        clientOnly = Boolean.parseBoolean(parameters.get("clientOnly"));
+      }
+      if (!parameters.containsKey("service") ||
+          !clientOnly && (!parameters.containsKey("address") || !parameters.containsKey("port"))) {
         throw new ConsulDiscoveryException(
           "Expected Consul URI in the format \"consul:(https://consul:8500/?service=myService&amp;address=amq.example" +
-            ".com&amp;port=61616)\". Found " +
-            consulURI);
+          ".com&amp;port=61616)\". Found " + consulURI);
       }
+      this.clientOnly = clientOnly;
       if (!basePath.toString().endsWith("/")) {
         basePath = basePath.resolve("/");
       }
       this.basePath = basePath;
       consulServiceName = parameters.get("service");
-      consulServiceId = parameters.get("serviceId") != null ? parameters.get("serviceId") : Long
-        .toHexString(UUID.randomUUID().getLeastSignificantBits());
+      consulServiceId = parameters.get("serviceId") != null ? parameters.get("serviceId") :
+                        Long.toHexString(UUID.randomUUID().getLeastSignificantBits());
       consulServiceAddress = parameters.get("address");
       consulServicePort = parameters.get("port");
 
@@ -109,8 +116,7 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
         try {
           maxQuarantineTime = Long.parseLong(maxQuarantineTimeString);
         } catch (NumberFormatException e) {
-          throw new ConsulDiscoveryException(
-            "Failed to parse maxQuarantineTime \"" + maxQuarantineTimeString + "\"", e);
+          throw new ConsulDiscoveryException("Failed to parse maxQuarantineTime \"" + maxQuarantineTimeString + "\"", e);
         }
       }
       String intervalString = parameters.get("interval");
@@ -136,7 +142,43 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
   }
 
   @Override
-  public void registerService(String name) throws IOException {}
+  public void registerService(String name) throws IOException {
+  }
+
+  @Override
+  public void serviceFailed(DiscoveryEvent discoveryEvent) throws IOException {
+    final ConsulDiscoveryEvent consulDiscoveryEvent = (ConsulDiscoveryEvent) discoveryEvent;
+    if (running.get()) {
+      // Simply remove the failing service and let service discovery handle reconnection.
+      services.remove(consulDiscoveryEvent.getService().getId());
+      listener.onServiceRemove(consulDiscoveryEvent);
+      long delay = Math.max(pollingInterval, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * pollingInterval);
+      if (delay > maxQuarantineTime) {
+        delay = maxQuarantineTime;
+      }
+      consulDiscoveryEvent.numberOfFails++;
+      if (consulDiscoveryEvent.failAt <= 0) {
+        consulDiscoveryEvent.failAt = System.currentTimeMillis();
+      } else {
+        if ((System.currentTimeMillis() - consulDiscoveryEvent.connectAt) > 60000L) {
+          LOG.warn("Quarantined service " + consulDiscoveryEvent.service.getId() +
+                   " has previous failed connection attempts, but the last attempt started over 1 minute ago. This suggests " +
+                   "that we're experiencing a new, unrelated, error event. Resetting quarantine.");
+          consulDiscoveryEvent.failAt = System.currentTimeMillis();
+          consulDiscoveryEvent.numberOfFails = 1;
+          delay = Math.max(pollingInterval, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * pollingInterval);
+          if (delay > maxQuarantineTime) {
+            delay = maxQuarantineTime;
+          }
+        }
+      }
+      consulDiscoveryEvent.quarantineUntil = consulDiscoveryEvent.failAt + delay;
+      String message = String.format("%02d minute(s) and %02d second(s)", TimeUnit.MILLISECONDS.toMinutes(delay),
+        (TimeUnit.MILLISECONDS.toSeconds(delay) - TimeUnit.MINUTES.toSeconds(TimeUnit.MILLISECONDS.toMinutes(delay))));
+      LOG.warn("Failed service connection to " + consulDiscoveryEvent.service.getId() + ". Quarantining for " + message);
+      quarantinedServices.put(consulDiscoveryEvent.service.getId(), consulDiscoveryEvent);
+    }
+  }
 
   @Override
   public void start() throws Exception {
@@ -145,7 +187,11 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
     taskRunner.init();
     running.set(true);
 
-    consul = Consul.builder().withUrl(basePath.toURL()).build();
+    if (CONSUL_HOLDER == null || !CONSUL_HOLDER.hasInstance()) {
+      CONSUL_HOLDER = ConsulHolder.initialize(Consul.builder().withUrl(basePath.toURL()).build(), this);
+    } else {
+      CONSUL_HOLDER = ConsulHolder.instance();
+    }
     registerSelf();
 
     executorService = Executors.newSingleThreadScheduledExecutor();
@@ -154,9 +200,13 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       public void run() {
         if (running.get()) {
           try {
-            consul.agentClient().checkTtl(consulServiceId, State.PASS, null);
-            HealthClient healthClient = consul.healthClient();
-            List<ServiceHealth> services = healthClient.getAllServiceInstances(consulServiceName).getResponse();
+            if (CONSUL_HOLDER == null || !CONSUL_HOLDER.hasInstance()) {
+              CONSUL_HOLDER =
+                ConsulHolder.initialize(Consul.builder().withUrl(basePath.toURL()).build(), ConsulDiscoveryAgent.this);
+            }
+            checkTtl();
+
+            List<ServiceHealth> services = CONSUL_HOLDER.getServices(consulServiceName);
             handleServices(services);
           } catch (Throwable t) {
             //We don't really want this thread to ever die as long as the agent is running, so we'll just log any
@@ -170,7 +220,32 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
     }, 0, pollingInterval, TimeUnit.MILLISECONDS);
   }
 
-  private void handleServices(Collection<ServiceHealth> serviceList) {
+  private void checkTtl() throws NotRegisteredException {
+    if (!clientOnly) {
+      CONSUL_HOLDER.checkTtl(consulServiceId);
+    }
+  }
+
+  @Override
+  public void stop() throws Exception {
+    LOG.info("Stopping Consul Discovery Agent for " + basePath);
+    running.set(false);
+
+    if (taskRunner != null) {
+      taskRunner.shutdown();
+    }
+
+    for (Map.Entry<String, Service> service : services.entrySet()) {
+      listener.onServiceRemove(new ConsulDiscoveryEvent(service.getValue()));
+    }
+    services.clear();
+
+    if (executorService != null) {
+      executorService.shutdown();
+    }
+  }
+
+  private void handleServices(Collection<ServiceHealth> serviceList) throws MalformedURLException {
     LOG.debug("Found (" + serviceList.size() + ") services.");
     List<ServiceHealth> servicesToAdd = new ArrayList<ServiceHealth>();
     List<ServiceHealth> servicesToDelete = new ArrayList<ServiceHealth>();
@@ -208,16 +283,14 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
       if (quarantinedEvent != null) {
         if (quarantinedEvent.quarantineUntil > System.currentTimeMillis()) {
           long delay = quarantinedEvent.quarantineUntil - System.currentTimeMillis();
-          String message = String.format("%02d minute(s) and %02d second(s)", TimeUnit.MILLISECONDS.toMinutes(delay), (
-            TimeUnit.MILLISECONDS.toSeconds(delay) -
-              TimeUnit.MINUTES.toSeconds(TimeUnit.MILLISECONDS.toMinutes(delay))));
-          LOG.warn("Service " + serviceNode.getService().getId() + " was found but is quarantined another " +
-            message + " due to " +
+          String message = String.format("%02d minute(s) and %02d second(s)", TimeUnit.MILLISECONDS.toMinutes(delay),
+            (TimeUnit.MILLISECONDS.toSeconds(delay) - TimeUnit.MINUTES.toSeconds(TimeUnit.MILLISECONDS.toMinutes(delay))));
+          LOG.warn(
+            "Service " + serviceNode.getService().getId() + " was found but is quarantined another " + message + " due to " +
             quarantinedEvent.numberOfFails + " previous failure(s)");
           continue;
         } else {
-          LOG.warn(
-            "Service " + serviceNode.getService().getId() + " was quarantined but is now allowed to attempt again");
+          LOG.warn("Service " + serviceNode.getService().getId() + " was quarantined but is now allowed to attempt again");
         }
       }
       if (!services.containsKey(serviceNode.getService().getId())) {
@@ -253,79 +326,24 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
     }
   }
 
-  private void registerSelf() {
+  private void registerSelf() throws MalformedURLException {
+    if (clientOnly) {
+      LOG.debug("Client only. Not registering self with consul");
+      return;
+    }
     LOG.info("Registering self with Consul");
-    Registration.RegCheck ttlCheck = ImmutableRegCheck.builder()
-      .ttl("60s")
-      .deregisterCriticalServiceAfter("1m")
-      .build();
-    Registration registration = ImmutableRegistration.builder()
-      .address(consulServiceAddress)
-      .port(Integer.parseInt(consulServicePort))
-      .name(consulServiceName)
-      .id(consulServiceId)
-      .check(ttlCheck)
-      .build();
-    consul.agentClient().register(registration);
+    Registration.RegCheck ttlCheck = ImmutableRegCheck.builder().ttl("60s").deregisterCriticalServiceAfter("1m").build();
+    Registration registration =
+      ImmutableRegistration.builder().address(consulServiceAddress).port(Integer.parseInt(consulServicePort))
+        .name(consulServiceName).id(consulServiceId).check(ttlCheck).build();
+    if (CONSUL_HOLDER != null && CONSUL_HOLDER.hasInstance()) {
+      CONSUL_HOLDER.registerSelf(registration);
+    } else {
+      CONSUL_HOLDER = ConsulHolder.initialize(Consul.builder().withUrl(basePath.toURL()).build(), this);
+      CONSUL_HOLDER.registerSelf(registration);
+    }
     Runtime.getRuntime().removeShutdownHook(shutdownHook);
     Runtime.getRuntime().addShutdownHook(shutdownHook);
-  }
-
-  @Override
-  public void stop() throws Exception {
-    LOG.info("Stopping Consul Discovery Agent for " + basePath);
-    running.set(false);
-
-    if (taskRunner != null) {
-      taskRunner.shutdown();
-    }
-
-    for (Map.Entry<String, Service> service : services.entrySet()) {
-      listener.onServiceRemove(new ConsulDiscoveryEvent(service.getValue()));
-    }
-    services.clear();
-
-    if (executorService != null) {
-      executorService.shutdown();
-    }
-  }
-
-  @Override
-  public void serviceFailed(DiscoveryEvent discoveryEvent) throws IOException {
-    final ConsulDiscoveryEvent consulDiscoveryEvent = (ConsulDiscoveryEvent) discoveryEvent;
-    if (running.get()) {
-      // Simply remove the failing service and let service discovery handle reconnection.
-      services.remove(consulDiscoveryEvent.getService().getId());
-      listener.onServiceRemove(consulDiscoveryEvent);
-      long delay = Math.max(pollingInterval, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * pollingInterval);
-      if (delay > maxQuarantineTime) {
-        delay = maxQuarantineTime;
-      }
-      consulDiscoveryEvent.numberOfFails++;
-      if (consulDiscoveryEvent.failAt <= 0) {
-        consulDiscoveryEvent.failAt = System.currentTimeMillis();
-      } else {
-        if ((System.currentTimeMillis() - consulDiscoveryEvent.connectAt) > 60000L) {
-          LOG.warn("Quarantined service " + consulDiscoveryEvent.service.getId() +
-            " has previous failed connection attempts, but the last attempt started over 1 minute ago. This suggests " +
-            "that we're experiencing a new, unrelated, error event. Resetting quarantine.");
-          consulDiscoveryEvent.failAt = System.currentTimeMillis();
-          consulDiscoveryEvent.numberOfFails = 1;
-          delay = Math.max(pollingInterval, BACKOFF_MULTIPLIER * consulDiscoveryEvent.numberOfFails * pollingInterval);
-          if (delay > maxQuarantineTime) {
-            delay = maxQuarantineTime;
-          }
-        }
-      }
-      consulDiscoveryEvent.quarantineUntil = consulDiscoveryEvent.failAt + delay;
-      String message = String
-        .format("%02d minute(s) and %02d second(s)", TimeUnit.MILLISECONDS.toMinutes(delay), (
-          TimeUnit.MILLISECONDS.toSeconds(delay) -
-            TimeUnit.MINUTES.toSeconds(TimeUnit.MILLISECONDS.toMinutes(delay))));
-      LOG.warn(
-        "Failed service connection to " + consulDiscoveryEvent.service.getId() + ". Quarantining for " + message);
-      quarantinedServices.put(consulDiscoveryEvent.service.getId(), consulDiscoveryEvent);
-    }
   }
 
   class ConsulDiscoveryEvent extends DiscoveryEvent {
@@ -348,12 +366,8 @@ public class ConsulDiscoveryAgent implements DiscoveryAgent {
 
     @Override
     public String toString() {
-      return "ConsulDiscoveryEvent{" +
-        "failed=" + failed +
-        ", service=" + service +
-        ", serviceName='" + serviceName + '\'' +
-        ", brokerName='" + brokerName + '\'' +
-        '}';
+      return "ConsulDiscoveryEvent{" + "failed=" + failed + ", service=" + service + ", serviceName='" + serviceName + '\'' +
+             ", brokerName='" + brokerName + '\'' + '}';
     }
   }
 }

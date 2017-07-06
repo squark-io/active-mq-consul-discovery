@@ -45,16 +45,14 @@ The following parameters are supported but **not required**:
 </dl>
 
 ### Client-side
-This has not been tested yet, but in theory, it should work with
+Tested in Jboss EAP 6.4
+Make sure the active-mq consul client JAR is included in the resource adapter module, and enter a URI similar to this:
 ```
-<transportConnectors>
-  <transportConnector name="default" uri="discovery:(consul:(http://consul.example.com?service=active-mq&amp;address=amq.example.com&amp;port=61616))"/>
-</transportConnectors>
+discovery:(consul:(http://consul:8500?service=active-mq&clientOnly=true))
 ```
 
 ## Road-map
 Planned items are:
-* Proper client-side testing
 * Maven releases
 
 ## Contributions
