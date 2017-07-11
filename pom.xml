@@ -6,7 +6,30 @@
 
     <groupId>io.squark</groupId>
     <artifactId>active-mq-consul-discovery</artifactId>
-    <version>0.0.2-SNAPSHOT</version>
+    <version>0.0.4</version>
+
+    <name>ActiveMQ Consul Discovery</name>
+    <description>Library for ActiveMQ Service discovery using Consul.io</description>
+    <url>https://squark.io/</url>
+    <scm>
+        <url>https://github.com/squark-io/active-mq-consul-discovery.git</url>
+    </scm>
+
+    <licenses>
+        <license>
+            <name>The Apache Software License, Version 2.0</name>
+            <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>erik</id>
+            <name>Erik Håkansson</name>
+            <email>erik@squark.io</email>
+        </developer>
+    </developers>
+
     <build>
         <plugins>
             <plugin>
@@ -16,6 +39,32 @@
                     <source>1.6</source>
                     <target>1.6</target>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.0.1</version>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>2.10.4</version>
+                <executions>
+                    <execution>
+                        <id>attach-javadoc</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -39,32 +88,6 @@
                     </relocations>
                 </configuration>
             </plugin>
-            <!--<plugin>-->
-                <!--<groupId>org.apache.felix</groupId>-->
-                <!--<artifactId>maven-bundle-plugin</artifactId>-->
-                <!--<version>3.3.0</version>-->
-                <!--<extensions>true</extensions>-->
-                <!--<executions>-->
-                    <!--<execution>-->
-                        <!--<id>generate-bundle</id>-->
-                        <!--<phase>prepare-package</phase>-->
-                        <!--<goals>-->
-                            <!--<goal>bundle</goal>-->
-                        <!--</goals>-->
-                    <!--</execution>-->
-                <!--</executions>-->
-                <!--<configuration>-->
-                    <!--<instructions>-->
-                        <!--<Export-Package>-->
-                            <!--{local-packages},-->
-                            <!--'=META-INF'-->
-                        <!--</Export-Package>-->
-                        <!--<Import-Package>-->
-                            <!--!com.fasterxml.jackson.databind-->
-                        <!--</Import-Package>-->
-                    <!--</instructions>-->
-                <!--</configuration>-->
-            <!--</plugin>-->
         </plugins>
     </build>
 
@@ -104,5 +127,13 @@
             <url>http://jcenter.bintray.com</url>
         </repository>
     </repositories>
+
+    <distributionManagement>
+        <repository>
+            <id>bintray-squark-io-squark.io</id>
+            <name>squark-io-squark.io</name>
+            <url>https://api.bintray.com/maven/squark-io/squark.io/active-mq-consul-discovery/;publish=1</url>
+        </repository>
+    </distributionManagement>
 
 </project>
