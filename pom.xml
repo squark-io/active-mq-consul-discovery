@@ -6,7 +6,7 @@
 
     <groupId>io.squark</groupId>
     <artifactId>active-mq-consul-discovery</artifactId>
-    <version>0.0.4</version>
+    <version>0.0.5-SNAPSHOT</version>
 
     <name>ActiveMQ Consul Discovery</name>
     <description>Library for ActiveMQ Service discovery using Consul.io</description>
