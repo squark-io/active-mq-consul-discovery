@@ -6,7 +6,7 @@
 
     <groupId>io.squark</groupId>
     <artifactId>active-mq-consul-discovery</artifactId>
-    <version>0.0.5-SNAPSHOT</version>
+    <version>0.0.5</version>
 
     <name>ActiveMQ Consul Discovery</name>
     <description>Library for ActiveMQ Service discovery using Consul.io</description>
@@ -80,12 +80,6 @@
                 </executions>
                 <configuration>
                     <createDependencyReducedPom>false</createDependencyReducedPom>
-                    <relocations>
-                        <relocation>
-                            <pattern>com.fasterxml.jackson</pattern>
-                            <shadedPattern>shaded.com.fasterxml.jackson</shadedPattern>
-                        </relocation>
-                    </relocations>
                 </configuration>
             </plugin>
         </plugins>
@@ -103,7 +97,8 @@
         <dependency>
             <groupId>com.orbitz.consul</groupId>
             <artifactId>consul-client</artifactId>
-            <version>0.15.1</version>
+            <version>0.16.1</version>
+            <classifier>shaded</classifier>
             <exclusions>
                 <exclusion>
                     <groupId>org.slf4j</groupId>
